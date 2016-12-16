@@ -1,3 +1,7 @@
+__author__ = 'Wang shi wen'
+
+#!/usr/bin/env python3
+
 import asyncio, logging
 import aiomysql
 
@@ -21,11 +25,14 @@ async def create_pool(db, password, user, loop, minsize=1, maxsize=10, autocommi
         loop=loop
     )
 
+# 封装SQL SELECT语句为select函数
 async def select(sql, args, size=None):
     log(sql, args)
     global __pool
     async with __pool.get() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
+            # 执行SQL语句
+            # SQL语句的占位符为?，MySQL的占位符为%s
             await cur.execute(sql.replace('?', '%s'), args or ())
             if size:
                 rs = await cur.fetchmany(size)
@@ -34,7 +41,9 @@ async def select(sql, args, size=None):
             logging.info('rows returned: %s', len(rs))
             return rs
 
-
+# 封装INSERT, UPDATE, DELETE
+# 语句操作参数一样，所以定义一个通用的执行函数
+# 返回操作影响的行号
 async def execute(sql, args, autocommit=True):
     log(sql)
     async with __pool.get() as conn:
@@ -54,15 +63,19 @@ async def execute(sql, args, autocommit=True):
 
 
 class Field(object):
+    # 表的字段包含名字、类型、是否为表的主键和默认值
     def __init__(self, name, column_type, primary_key, default):
         self.name = name;
         self.column_type = column_type;
         self.primary_key = primary_key;
         self.default = default;
 
+    # 当打印(数据库)表时，输出(数据库)表的信息:类名，字段类型和名字
     def __str__(self):
         return '<%s, %s:%s>' % (self.__class__.__name__, self.column_type, self.name)
 
+# -*- 定义不同类型的衍生Field -*-
+# -*- 表的不同列的字段的类型不一样
 class StringField(Field):
     def __init__(self, name=None, primary_key=False, default=None, ddl='varchar(100)'):
         super().__init__(name, ddl, primary_key, default)
@@ -83,13 +96,31 @@ class TextField(Field):
     def __init__(self, name=None, default=None):
         super().__init__(name, 'text', False, default)
 
+# 根据输入的参数生成占位符列表
 def create_args_string(num):
     L = []
     for n in range(num):
         L.append('?')
+    # 以','为分隔符，将列表合成字符串
     return ', '.join(L)
 
+# -*-定义Model的元类
+
+# 所有的元类都继承自type
+# ModelMetaclass元类定义了所有Model基类(继承ModelMetaclass)的子类实现的操作
+
+# -*-ModelMetaclass的工作主要是为一个数据库表映射成一个封装的类做准备：
+# ***读取具体子类(user)的映射信息
+# 创造类的时候，排除对Model类的修改
+# 在当前类中查找所有的类属性(attrs)，如果找到Field属性，就将其保存到__mappings__的dict中，同时从类属性中删除Field(防止实例属性遮住类的同名属性)
+# 将数据库表名保存到__table__中
+
+# 完成这些工作就可以在Model中定义各种数据库的操作方法
 class ModelMetaclass(type):
+    # __new__控制__init__的执行，所以在其执行之前
+    # cls:代表要__init__的类，此参数在实例化时由Python解释器自动提供(例如下文的User和Model)
+    # bases：代表继承父类的集合
+    # attrs：类的方法集合
     def __new__(cls, name, bases, attrs):
         #排除Model类本身
         if name == 'Model':
@@ -106,10 +137,11 @@ class ModelMetaclass(type):
         for k, v in attrs.items():
             #需要封装过的类型，才能解析，  可否使用的系统的类型？？
             if isinstance(v, Field):
+                # 此处打印的k是类的一个属性，v是这个属性在数据库中对应的Field列表属性
                 logging.info('found mapping: %s ==> %s', k, v)
                 mappings[k] = v
                 if v.primary_key:
-                    # 找到主键
+                    # 如果此时类实例的以存在主键，说明主键重复了
                     if primaryKey:
                         raise RuntimeError('Duplicate primary key for field: %s', k)
                     primaryKey = k
@@ -119,16 +151,19 @@ class ModelMetaclass(type):
         if not primaryKey:
             raise RuntimeError('Primary key not found')
 
+        # 从类属性中删除Field属性
         for k in mappings.keys():
             attrs.pop(k)
-        # 转化位字符串
+        # 保存除主键外的属性名为``（运算出字符串）列表形式
         escaped_fields = list(map(lambda f: '`%s`' % f, fields))
 
         attrs['__mappings__'] = mappings # 保存属性和列的映射关系
         attrs['__table__'] = tableName
         attrs['__primary_key__'] = primaryKey
+        # 保存除主键外的属性名
         attrs['__fields__'] = fields
         # 构造默认的SELECT, INSERT, UPDATE和DELETE语句:
+        # ``反引号功能同repr()
         attrs['__select__'] = 'select `%s`, %s from `%s`' % (primaryKey, ', '.join(escaped_fields), tableName)
         attrs['__insert__'] = 'insert into `%s` (%s, `%s`) values (%s)' % (
         tableName, ', '.join(escaped_fields), primaryKey, create_args_string(len(escaped_fields) + 1))
@@ -137,6 +172,14 @@ class ModelMetaclass(type):
         attrs['__delete__'] = 'delete from `%s` where `%s`=?' % (tableName, primaryKey)
         return type.__new__(cls, name, bases, attrs)
 
+
+# 定义ORM所有映射的基类：Model
+# Model类的任意子类可以映射一个数据库表
+# Model类可以看作是对所有数据库表操作的基本定义的映射
+
+# 基于字典查询形式
+# Model从dict继承，拥有字典的所有功能，同时实现特殊方法__getattr__和__setattr__，能够实现属性操作
+# 实现数据库操作的所有方法，定义为class方法，所有继承自Model都具有数据库操作方法
 class Model(dict, metaclass=ModelMetaclass):
     def __init__(self, **kw):
         super(Model, self).__init__(**kw)
@@ -164,6 +207,7 @@ class Model(dict, metaclass=ModelMetaclass):
         return value
 
     @classmethod  #类方法
+    # 类方法有类变量cls传入，从而可以用cls做一些相关的处理。并且有子类继承时，调用该类方法时，传入的类变量cls是子类，而非父类。
     async def find (cls, pk):
         ' find object by primary key. '
         s1 = cls.__select__
@@ -231,37 +275,37 @@ class Model(dict, metaclass=ModelMetaclass):
             logging.warning('failed to remove by primary key: affected rows: %s' % rows)
 
 #测试
-class User(Model):
-    __table__ = 'user'
-
-    id = IntegerField(primary_key=True)
-    name = StringField()
-
-async def test(loop=None):
-    await create_pool('ceshi', '123456', 'root', loop)
-
-    #查找
-    #user = await User.find(1)
-    #list = await User.findAll()
-    #print('user: %s', list)
-    #count = await User.findNumber('id')
-    #print('count: %s', count)
-
-    #插入
-    #user = User(id=4, name='小白')
-    #await user.save()
-
-    #更新
-
-    # user = await User.find(1)
-    # user.name = '小黑'
-    # await user.update()
-
-    #删除
-    # user = await User.find(2)
-    # await user.remove()
-
-
-loop = asyncio.get_event_loop()
-loop.run_until_complete(test())
-loop.run_forever()
+# class User(Model):
+#     __table__ = 'user'
+#
+#     id = IntegerField(primary_key=True)
+#     name = StringField()
+#
+# async def test(loop=None):
+#     await create_pool('ceshi', '123456', 'root', loop)
+#
+#     #查找
+#     #user = await User.find(1)
+#     #list = await User.findAll()
+#     #print('user: %s', list)
+#     #count = await User.findNumber('id')
+#     #print('count: %s', count)
+#
+#     #插入
+#     #user = User(id=4, name='小白')
+#     #await user.save()
+#
+#     #更新
+#
+#     # user = await User.find(1)
+#     # user.name = '小黑'
+#     # await user.update()
+#
+#     #删除
+#     # user = await User.find(2)
+#     # await user.remove()
+#
+#
+# loop = asyncio.get_event_loop()
+# loop.run_until_complete(test())
+# loop.run_forever()
