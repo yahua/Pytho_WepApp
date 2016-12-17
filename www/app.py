@@ -9,6 +9,8 @@ from jinja2 import Environment, FileSystemLoader
 from www.coroweb import add_routes, add_static
 import www.orm
 
+import conf.config
+
 def init_jinja2(app, **kw):
     logging.info('init jinja2...')
     options = dict(
@@ -103,7 +105,11 @@ def index(request):
     return web.Response(body=b'<h1>Awesome</h1>', content_type='text/html', charset='UTF-8')
 
 async def init(loop):
-    await www.orm.create_pool('awesome', '123456', 'root', loop)
+    configs = conf.config.configs
+    if not isinstance(configs, dict):
+        raise ValueError('configs must be a dict')
+    db = configs['db']
+    await www.orm.create_pool(loop, **db)
     app = web.Application(loop=loop, middlewares=[
         logger_factory, response_factory
     ])
