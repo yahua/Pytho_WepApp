@@ -20,7 +20,7 @@ def get_page_index(page_str):
         p = int(page_str)
     except ValueError as e:
         pass
-    if p<1:
+    if p < 1:
         p = 1
     return p
 
@@ -72,7 +72,7 @@ def cookie2user(cookie_str):
 async def index(*, page='1'):
     page_index = get_page_index(page)
     num = await Blog.findNumber('count(id)')
-    page = Page(num)
+    page = Page(num, page_index)
     if num == 0:
         blogs = []
     else:
@@ -199,9 +199,20 @@ async def api_get_users(*, page='1'):
     p = Page(num, page_index)
     if num == 0:
         return dict(page=p, users=())
+    #管理员用户显示最前面
+    admin_users = await User.findAll('admin=?', [1])
     users = await User.findAll(orderBy='created_at desc', limit=(p.offset, p.limit))
+    need_remove_users = []
     for u in users:
         u.passwd = '******'
+        if u.admin == 1:
+            need_remove_users.append(u)
+
+    if len(admin_users) > 0 and len(need_remove_users) > 0:
+        for u in need_remove_users:
+            users.remove(u)
+        for u in admin_users:
+            users.insert(0, u)
     return dict(page=p, users=users)
 
 @post('/api/authenticate')
@@ -231,7 +242,7 @@ async def authenticate(*, email, passwd):
 
 _RE_EMAIL = re.compile(r'^[a-z0-9\.\-\_]+\@[a-z0-9\-\_]+(\.[a-z0-9\-\_]+){1,4}$')
 _RE_SHA1 = re.compile(r'^[0-9a-f]{40}$')
-@post('/api/users')
+@post('/api/register_user')
 async def api_register_user(*, email, name, passwd):
     if not name or not name.strip():
         raise APIValuaError('name', 'Invalid name.')
